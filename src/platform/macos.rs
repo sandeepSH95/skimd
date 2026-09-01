@@ -5,12 +5,14 @@
 //! `NSAppleEventManager`; opened paths flow through a channel into an iced
 //! subscription.
 //!
-//! Registration happens twice: once up front, and again when AppKit posts
-//! `NSApplicationDidFinishLaunchingNotification` — `finishLaunching`
-//! installs AppKit's own `odoc` handler (which, with no NSDocument classes,
-//! rejects every file with an error dialog), displacing ours. Last
-//! registration wins, and the launch event is only dispatched after that
-//! notification fires, so re-registering there catches it.
+//! Timing matters: `-[NSApplication finishLaunching]` installs AppKit's own
+//! `odoc` handler (which, with no NSDocument classes, rejects every file
+//! with an error dialog) BEFORE posting `willFinishLaunching`, and the
+//! launch event is dispatched right after that notification. Last
+//! registration wins, so re-registering in a `willFinishLaunching` observer
+//! reclaims the handler in time for both the launch event and everything
+//! later. (Re-registering at `didFinishLaunching` is too late — verified
+//! empirically: the launch event fires between the two notifications.)
 
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -56,8 +58,8 @@ declare_class!(
             forward_paths(event);
         }
 
-        #[method(applicationDidFinishLaunching:)]
-        fn application_did_finish_launching(&self, _notification: &NSNotification) {
+        #[method(applicationWillFinishLaunching:)]
+        fn application_will_finish_launching(&self, _notification: &NSNotification) {
             register_odoc_handler(self);
         }
     }
@@ -112,15 +114,15 @@ pub fn install_open_handler() {
     let handler: Retained<OpenHandler> = unsafe { msg_send_id![super(this), init] };
 
     // Take the handler slot now for events that arrive pre-launch, and
-    // observe didFinishLaunching to take it back from AppKit (see module
-    // docs for the displacement dance).
+    // observe willFinishLaunching to take it back from AppKit (see the
+    // module docs for the displacement dance).
     register_odoc_handler(&handler);
     unsafe {
         let center = NSNotificationCenter::defaultCenter();
-        let name = NSString::from_str("NSApplicationDidFinishLaunchingNotification");
+        let name = NSString::from_str("NSApplicationWillFinishLaunchingNotification");
         center.addObserver_selector_name_object(
             &handler,
-            sel!(applicationDidFinishLaunching:),
+            sel!(applicationWillFinishLaunching:),
             Some(&name),
             None,
         );

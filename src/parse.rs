@@ -1,10 +1,12 @@
-//! Pure source ↔ block mapping for block-swap editing (wired into the view
-//! in M2; tested standalone until then).
-#![allow(dead_code)]
+//! Pure source ↔ block mapping for block-swap editing.
 
+use std::collections::HashMap;
 use std::ops::Range;
 
+use iced::widget::markdown;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
+
+use crate::state::Block;
 
 /// Must match the options `iced::widget::markdown::Content::parse` enables,
 /// so a block renders the same in isolation as in the full document.
@@ -94,6 +96,135 @@ pub fn strip_fence_languages(source: &str) -> String {
     }
     out.push_str(&source[cursor..]);
     out
+}
+
+/// Parses source into rendered blocks; ranges index into `source`.
+///
+/// With `highlight: false`, fence languages are stripped per block (slice
+/// coordinates are untouched, so ranges stay valid for `splice`); the
+/// returned bool reports whether anything was stripped — i.e. whether a
+/// highlighted reparse is owed.
+///
+/// Reference-link definitions ([label]: url) emit no parse events and can
+/// live in a different block than their uses, so every collected definition
+/// is appended to every block's parse input. Unused definitions render
+/// nothing; within a block, its own (earlier) definition wins over an
+/// appended duplicate.
+pub fn parse_blocks(source: &str, highlight: bool) -> (Vec<Block>, bool) {
+    let defs = reference_definitions(source);
+    let mut any_stripped = false;
+
+    let blocks = segment(source)
+        .into_iter()
+        .map(|range| {
+            let slice = &source[range.clone()];
+            let stripped;
+            let text = if highlight {
+                slice
+            } else {
+                stripped = strip_fence_languages(slice);
+                any_stripped |= stripped.len() != slice.len();
+                &stripped
+            };
+
+            let content = parse_one(text, &defs);
+            Block { range, content }
+        })
+        .collect();
+
+    (blocks, any_stripped)
+}
+
+/// Rebuilds blocks after `splice(old_source, range, edited)` produced
+/// `source`, reusing parsed content wherever possible: blocks entirely
+/// before the edit keep identical ranges, blocks entirely after it shift
+/// by a constant delta with identical bytes — only the edited region needs
+/// parsing. If the edit changed the document's reference definitions,
+/// everything reparses (a definition can affect any block).
+pub fn reparse_spliced(
+    old_blocks: Vec<Block>,
+    old_source: &str,
+    source: &str,
+    range: Range<usize>,
+    edited_len: usize,
+) -> Vec<Block> {
+    let defs = reference_definitions(source);
+    if defs != reference_definitions(old_source) {
+        return parse_blocks(source, true).0;
+    }
+
+    let delta = edited_len as isize - range.len() as isize;
+    let edited_end = range.start + edited_len;
+    let mut old: HashMap<usize, Block> = old_blocks
+        .into_iter()
+        .map(|block| (block.range.start, block))
+        .collect();
+
+    segment(source)
+        .into_iter()
+        .map(|new_range| {
+            let reused = if new_range.end <= range.start {
+                // Entirely before the edit: same offsets, same bytes.
+                old.remove(&new_range.start)
+                    .filter(|b| b.range == new_range)
+            } else if new_range.start >= edited_end {
+                // Entirely after: same bytes at offsets shifted by delta.
+                new_range
+                    .start
+                    .checked_add_signed(-delta)
+                    .and_then(|old_start| old.remove(&old_start))
+                    .filter(|b| b.range.len() == new_range.len())
+            } else {
+                None
+            };
+
+            match reused {
+                Some(block) => Block {
+                    range: new_range,
+                    content: block.content,
+                },
+                None => {
+                    let content = parse_one(&source[new_range.clone()], &defs);
+                    Block {
+                        range: new_range,
+                        content,
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+fn parse_one(text: &str, defs: &str) -> markdown::Content {
+    if defs.is_empty() {
+        markdown::Content::parse(text)
+    } else {
+        let mut with_defs = String::with_capacity(text.len() + defs.len() + 2);
+        with_defs.push_str(text);
+        with_defs.push_str("\n\n");
+        with_defs.push_str(defs);
+        markdown::Content::parse(&with_defs)
+    }
+}
+
+/// Collects reference-link definition lines from the whole document.
+///
+/// A plain line scan: a matching line inside a code fence is collected too,
+/// but a false definition is only visible if a real block references its
+/// exact label — accepted for now.
+fn reference_definitions(source: &str) -> String {
+    let mut defs = String::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start_matches(' ');
+        if line.len() - trimmed.len() <= 3
+            && trimmed.starts_with('[')
+            && trimmed.contains("]:")
+        {
+            defs.push_str(line);
+            defs.push('\n');
+        }
+    }
+    defs
 }
 
 /// Replaces `range` in `source` with `edited`.

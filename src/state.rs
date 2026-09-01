@@ -1,20 +1,42 @@
+use std::ops::Range;
 use std::path::PathBuf;
 
 use iced::Task;
 use iced::theme::Mode;
-use iced::widget::markdown;
+use iced::widget::{markdown, text_editor};
 
 /// The entire application state, visible in one place.
 pub struct State {
     pub path: Option<PathBuf>,
     /// Source of truth for the file's text.
     pub source: String,
-    pub content: markdown::Content,
+    /// Derived from `source`; rebuilt on load and on every commit.
+    pub blocks: Vec<Block>,
+    /// `Some` while one block shows its raw markdown in an editor.
+    pub editing: Option<Editing>,
+    /// Unsaved changes exist.
+    pub dirty: bool,
     pub mode: Mode,
     pub error: Option<String>,
     /// The current file has language-tagged code fences rendered without
     /// highlighting; a highlighted reparse is owed after the next frame.
     pub needs_highlight: bool,
+}
+
+/// One top-level markdown block: its byte range in `source` (the ranges
+/// tile the source exactly) and its parsed render content.
+pub struct Block {
+    pub range: Range<usize>,
+    pub content: markdown::Content,
+}
+
+/// The active raw-markdown editor.
+pub struct Editing {
+    pub index: usize,
+    pub editor: text_editor::Content,
+    /// Trailing newlines of the block's slice (the inter-block gap), held
+    /// out of the editor and re-attached verbatim on commit.
+    pub suffix: String,
 }
 
 #[derive(Debug, Clone)]
@@ -29,13 +51,21 @@ pub enum Message {
     Rehighlight(PathBuf),
     LinkClicked(markdown::Uri),
     SystemThemeChanged(Mode),
+    BlockClicked(usize),
+    Edit(text_editor::Action),
+    /// Splice the active editor's text back into `source` and re-render.
+    CommitActive,
+    Save,
+    Saved(Result<(), String>),
 }
 
 pub fn boot(path: Option<PathBuf>) -> (State, Task<Message>) {
     let mut state = State {
         path: None,
         source: String::new(),
-        content: markdown::Content::new(),
+        blocks: Vec::new(),
+        editing: None,
+        dirty: false,
         mode: Mode::None,
         error: None,
         needs_highlight: false,

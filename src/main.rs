@@ -65,12 +65,17 @@ pub fn warm_highlighter() {
 }
 
 fn title(state: &State) -> String {
-    match &state.path {
+    let name = match &state.path {
         Some(path) => path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "skimd".to_owned()),
         None => "skimd".to_owned(),
+    };
+    if state.dirty {
+        format!("{name} — Edited")
+    } else {
+        name
     }
 }
 
@@ -90,6 +95,17 @@ fn subscription(state: &State) -> Subscription<Message> {
         iced::event::listen_with(|event, _status, _id| match event {
             iced::Event::Window(iced::window::Event::FileDropped(path)) => {
                 Some(Message::FileOpened(path))
+            }
+            _ => None,
+        }),
+        // Cmd+S outside the editor (inside, the editor's key_binding wins
+        // because captured events never reach this listener).
+        iced::keyboard::listen().filter_map(|event| match event {
+            iced::keyboard::Event::KeyPressed { key, modifiers, .. }
+                if modifiers.command()
+                    && matches!(key.as_ref(), iced::keyboard::Key::Character("s")) =>
+            {
+                Some(Message::Save)
             }
             _ => None,
         }),

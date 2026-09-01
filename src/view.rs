@@ -1,9 +1,15 @@
-use iced::widget::{column, container, markdown, rich_text, scrollable, text};
+use iced::keyboard::{Key, key};
+use iced::theme::Mode;
+use iced::widget::text_editor::{Binding, KeyPress};
+use iced::widget::{
+    column, container, markdown, mouse_area, rich_text, scrollable, text, text_editor,
+};
 use iced::{Element, Fill, Pixels, padding};
 use pulldown_cmark::HeadingLevel;
 
-use crate::state::{Message, State};
+use crate::state::{Editing, Message, State};
 use crate::theme;
+use crate::update::EDITOR_ID;
 
 pub fn view(state: &State) -> Element<'_, Message> {
     if state.path.is_none() {
@@ -15,22 +21,68 @@ pub fn view(state: &State) -> Element<'_, Message> {
     }
 
     let settings = theme::markdown_settings(state.mode);
-    let doc = markdown::view_with(state.content.items(), settings, &SkimViewer)
-        .map(Message::LinkClicked);
+    let blocks = state.blocks.iter().enumerate().map(|(i, block)| {
+        match &state.editing {
+            Some(editing) if editing.index == i => editor_view(editing, state.mode),
+            _ => mouse_area(
+                markdown::view_with(block.content.items(), settings, &SkimViewer)
+                    .map(Message::LinkClicked),
+            )
+            .on_press(Message::BlockClicked(i))
+            .into(),
+        }
+    });
 
     let mut page = column![];
     if let Some(error) = &state.error {
         page = page.push(text(error).style(text::danger));
     }
-    page = page.push(doc);
+    page = page.extend(blocks);
 
-    scrollable(
-        container(page.spacing(settings.spacing).max_width(720).padding([48, 32]))
-            .center_x(Fill),
+    // Blocks and the editor capture their own clicks; anything that falls
+    // through hit empty background, which commits the active edit.
+    mouse_area(
+        scrollable(
+            container(page.spacing(settings.spacing).max_width(720).padding([48, 32]))
+                .center_x(Fill),
+        )
+        .width(Fill)
+        .height(Fill),
     )
-    .width(Fill)
-    .height(Fill)
+    .on_press(Message::CommitActive)
     .into()
+}
+
+/// The active block as a raw-markdown editor: mono, markdown-highlighted,
+/// Escape commits, Cmd+S commits and saves.
+fn editor_view(editing: &Editing, mode: Mode) -> Element<'_, Message> {
+    let hl_theme = match mode {
+        Mode::Dark => iced::highlighter::Theme::Base16Ocean,
+        Mode::Light | Mode::None => iced::highlighter::Theme::InspiredGitHub,
+    };
+
+    text_editor(&editing.editor)
+        .id(EDITOR_ID)
+        .on_action(Message::Edit)
+        .key_binding(key_binding)
+        .highlight("markdown", hl_theme)
+        .wrapping(text::Wrapping::Word)
+        .font(theme::MONO)
+        .size(14)
+        .padding(10)
+        .into()
+}
+
+fn key_binding(key_press: KeyPress) -> Option<Binding<Message>> {
+    if let Key::Named(key::Named::Escape) = key_press.key.as_ref() {
+        return Some(Binding::Custom(Message::CommitActive));
+    }
+    if key_press.modifiers.command()
+        && matches!(key_press.key.as_ref(), Key::Character("s"))
+    {
+        return Some(Binding::Custom(Message::Save));
+    }
+    Binding::from_key_press(key_press)
 }
 
 /// Default markdown rendering, except headings are bold — iced's default
