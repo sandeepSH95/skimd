@@ -1,0 +1,38 @@
+[package]
+name = "skimd"
+version = "0.1.0"
+edition = "2024"
+description = "Ultra-fast beautiful markdown viewer"
+
+[dependencies]
+env_logger = { version = "0.11", optional = true }
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "markdown", "highlighter", "thread-pool", "crisp", "advanced"] }
+open = "5"
+pulldown-cmark = { version = "0.12", default-features = false }
+
+[features]
+default = []
+# GPU escape hatch: cargo build --release --features gpu
+gpu = ["iced/wgpu"]
+# Exit right after the first frame is presented, for cold-start benchmarking.
+# Also prints launch-to-first-frame timing and enables debug logging so
+# cosmic-text reports its font-scan time (RUST_LOG=debug).
+bench-first-frame = ["dep:env_logger"]
+env_logger = ["dep:env_logger"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Release with symbols, for Instruments/xctrace.
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = "line-tables-only"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSAppleEventManager", "NSAppleEventDescriptor", "NSString", "NSArray", "NSURL", "NSNotification"] }
