@@ -88,20 +88,39 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
         }
         Message::Edit(action) => {
-            if let Some(editing) = &mut state.editing {
-                if matches!(action, text_editor::Action::Edit(_)) {
-                    state.dirty = true;
-                    state.quit_armed = false;
-                }
+            if matches!(action, text_editor::Action::Edit(_)) {
+                state.dirty = true;
+                state.quit_armed = false;
+            }
+            if let Some(raw) = &mut state.raw {
+                raw.perform(action);
+            } else if let Some(editing) = &mut state.editing {
                 editing.editor.perform(action);
             }
             Task::none()
         }
         Message::CommitActive => {
-            commit_active(state);
+            // In raw mode Escape flips back to the rendered view instead.
+            if state.raw.is_some() {
+                exit_raw(state);
+            } else {
+                commit_active(state);
+            }
             Task::none()
         }
+        Message::ToggleRaw => {
+            if state.raw.is_some() {
+                exit_raw(state);
+                Task::none()
+            } else {
+                commit_active(state);
+                state.find = None;
+                state.raw = Some(text_editor::Content::with_text(&state.source));
+                iced::widget::operation::focus(EDITOR_ID)
+            }
+        }
         Message::Save => {
+            sync_raw(state);
             commit_active(state);
             state.quit_armed = false;
             let Some(path) = state.path.clone() else {
@@ -157,6 +176,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             Task::none()
         }
         Message::Quit => {
+            sync_raw(state);
             let editing_changes = state.editing.is_some();
             if (state.dirty || editing_changes) && !state.quit_armed {
                 state.quit_armed = true;
@@ -165,6 +185,9 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             iced::exit()
         }
         Message::FindOpen => {
+            if state.raw.is_some() {
+                return Task::none();
+            }
             if state.find.is_none() {
                 state.find = Some(Find {
                     query: String::new(),
@@ -220,6 +243,7 @@ pub fn open_file(state: &mut State, path: PathBuf) {
     state.error = None;
     state.disk_changed = false;
     state.quit_armed = false;
+    state.raw = None;
     refresh_find(state);
 }
 
@@ -227,10 +251,34 @@ pub fn open_file(state: &mut State, path: PathBuf) {
 /// reloads, where syntect is warm long since).
 fn load_source(state: &mut State, source: String) {
     (state.blocks, _) = parse::parse_blocks(&source, true);
+    // A raw editor stays open across a disk reload, refreshed in place.
+    if state.raw.is_some() {
+        state.raw = Some(text_editor::Content::with_text(&source));
+    }
     state.source = source;
     state.editing = None;
     state.dirty = false;
     refresh_find(state);
+}
+
+/// Pulls the raw editor's text into `source` (and reparses, so blocks are
+/// never stale) without leaving raw mode. Used by Save and Quit so they
+/// act on what's on screen.
+fn sync_raw(state: &mut State) {
+    let Some(raw) = &state.raw else { return };
+    let text = raw.text();
+    if text != state.source {
+        state.source = text;
+        (state.blocks, _) = parse::parse_blocks(&state.source, true);
+        state.dirty = true;
+        refresh_find(state);
+    }
+}
+
+/// Leaves raw mode, committing its text.
+fn exit_raw(state: &mut State) {
+    sync_raw(state);
+    state.raw = None;
 }
 
 /// Swaps the block at `index` to a raw-markdown editor and focuses it.
@@ -360,6 +408,7 @@ mod tests {
             disk_changed: false,
             quit_armed: false,
             find: None,
+            raw: None,
         }
     }
 
@@ -492,6 +541,34 @@ mod tests {
         // Activation places the cursor at the block's end, so the paste
         // extends "aa" rather than preceding it.
         assert!(state.source.starts_with("aalonger first block"));
+    }
+
+    #[test]
+    fn raw_mode_roundtrip() {
+        let mut state = state_with("one\n\ntwo\n");
+
+        // Toggle in and straight back out: byte-identical, not dirty.
+        let _ = update(&mut state, Message::ToggleRaw);
+        assert!(state.raw.is_some());
+        let _ = update(&mut state, Message::ToggleRaw);
+        assert!(state.raw.is_none());
+        assert_eq!(state.source, "one\n\ntwo\n");
+        assert!(!state.dirty);
+
+        // Edit in raw mode, exit: source updated, blocks reparsed, dirty.
+        let _ = update(&mut state, Message::ToggleRaw);
+        let _ = update(
+            &mut state,
+            Message::Edit(text_editor::Action::Move(text_editor::Motion::DocumentEnd)),
+        );
+        let _ = update(
+            &mut state,
+            Message::Edit(text_editor::Action::Edit(text_editor::Edit::Insert('x'))),
+        );
+        let _ = update(&mut state, Message::ToggleRaw);
+        assert_eq!(state.source, "one\n\ntwo\nx");
+        assert_eq!(state.blocks.len(), 2);
+        assert!(state.dirty);
     }
 
     #[test]

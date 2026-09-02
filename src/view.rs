@@ -21,6 +21,10 @@ pub fn view(state: &State) -> Element<'_, Message> {
         return container(hint).center(Fill).into();
     }
 
+    if let Some(raw) = &state.raw {
+        return with_mode_toggle(raw_view(raw, state.mode), true, state.mode);
+    }
+
     let settings = theme::markdown_settings(state.mode);
     let blocks = state.blocks.iter().enumerate().map(|(i, block)| {
         match &state.editing {
@@ -74,7 +78,71 @@ pub fn view(state: &State) -> Element<'_, Message> {
             text("").into(),
         ));
     }
-    root.push(doc).into()
+    with_mode_toggle(root.push(doc).into(), false, state.mode)
+}
+
+/// Overlays the raw/rendered toggle button in the top-right corner:
+/// grey while viewing, ink while the raw editor is active.
+fn with_mode_toggle(
+    content: Element<'_, Message>,
+    raw_active: bool,
+    mode: Mode,
+) -> Element<'_, Message> {
+    let base = if matches!(mode, Mode::Dark) {
+        iced::Color::WHITE
+    } else {
+        iced::color!(0x1A1A1A)
+    };
+    let toggle = button(text("#").font(theme::BODY_ITALIC).size(20))
+        .style(move |_theme, status| {
+            let hovered = matches!(
+                status,
+                button::Status::Hovered | button::Status::Pressed
+            );
+            let alpha = match (raw_active, hovered) {
+                (false, false) => 0.2,
+                (false, true) => 0.55,
+                (true, false) => 0.7,
+                (true, true) => 1.0,
+            };
+            button::Style {
+                text_color: base.scale_alpha(alpha),
+                ..button::Style::default()
+            }
+        })
+        .padding(4)
+        .on_press(Message::ToggleRaw);
+
+    iced::widget::stack![
+        content,
+        container(toggle)
+            .width(Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            // Optically equidistant: the text box carries line-height
+            // whitespace above the glyph, so the top inset is smaller.
+            .padding(iced::padding::top(5).right(16)),
+    ]
+    .into()
+}
+
+/// The whole document as one raw markdown editor.
+fn raw_view(raw: &iced::widget::text_editor::Content, mode: Mode) -> Element<'_, Message> {
+    let hl_theme = match mode {
+        Mode::Dark => iced::highlighter::Theme::Base16Ocean,
+        Mode::Light | Mode::None => iced::highlighter::Theme::InspiredGitHub,
+    };
+
+    text_editor(raw)
+        .id(EDITOR_ID)
+        .on_action(Message::Edit)
+        .key_binding(key_binding)
+        .highlight("markdown", hl_theme)
+        .wrapping(text::Wrapping::Word)
+        .font(theme::MONO)
+        .size(14)
+        .padding(24)
+        .height(Fill)
+        .into()
 }
 
 fn banner<'a>(message: &'a str, actions: Element<'a, Message>) -> Element<'a, Message> {

@@ -13,6 +13,10 @@ pub const INTER_BOLD_ITALIC: &[u8] = include_bytes!("../assets/fonts/Inter-BoldI
 pub const JBMONO_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 
 pub const BODY: Font = Font::with_name("Inter");
+pub const BODY_ITALIC: Font = Font {
+    style: font::Style::Italic,
+    ..BODY
+};
 pub const MONO: Font = Font::with_name("JetBrains Mono");
 pub const HEADING: Font = Font {
     weight: font::Weight::Bold,

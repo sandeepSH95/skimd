@@ -28,6 +28,9 @@ pub struct State {
     pub quit_armed: bool,
     /// `Some` while the find bar is open.
     pub find: Option<Find>,
+    /// `Some` while the whole document is shown as one raw text editor
+    /// (the block view and `editing` are inactive meanwhile).
+    pub raw: Option<text_editor::Content>,
 }
 
 /// One top-level markdown block: its byte range in `source` (the ranges
@@ -81,6 +84,8 @@ pub enum Message {
     FindInput(String),
     FindNext,
     FindClose,
+    /// Flip between the rendered block view and one whole-document editor.
+    ToggleRaw,
 }
 
 pub fn boot(path: Option<PathBuf>) -> (State, Task<Message>) {
@@ -96,6 +101,7 @@ pub fn boot(path: Option<PathBuf>) -> (State, Task<Message>) {
         disk_changed: false,
         quit_armed: false,
         find: None,
+        raw: None,
     };
 
     // Read synchronously: a typical markdown file loads in well under a
