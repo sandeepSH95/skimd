@@ -13,6 +13,34 @@ use crate::theme;
 use crate::update::{EDITOR_ID, FIND_ID, SCROLL_ID};
 
 pub fn view(state: &State) -> Element<'_, Message> {
+    if let Some((path, bytes)) = &state.large_pending {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return container(
+            column![
+                text(name).size(18).font(theme::HEADING),
+                text(format!(
+                    "{:.1} MB. Rendering a file this large can take a while.",
+                    *bytes as f64 / 1_000_000.0
+                ))
+                .style(text::secondary),
+                row![
+                    button(text("Open anyway").size(14)).on_press(Message::OpenLargeAnyway),
+                    button(text("Cancel").size(14))
+                        .style(button::secondary)
+                        .on_press(Message::OpenLargeCancel),
+                ]
+                .spacing(12),
+            ]
+            .spacing(14)
+            .align_x(iced::Alignment::Center),
+        )
+        .center(Fill)
+        .into();
+    }
+
     if state.path.is_none() {
         let hint = match &state.error {
             Some(error) => text(error).style(text::danger),

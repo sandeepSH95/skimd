@@ -31,6 +31,9 @@ pub struct State {
     /// `Some` while the whole document is shown as one raw text editor
     /// (the block view and `editing` are inactive meanwhile).
     pub raw: Option<text_editor::Content>,
+    /// A file over the eager-render size limit awaits confirmation
+    /// (path, size in bytes). The prompt replaces the document view.
+    pub large_pending: Option<(PathBuf, u64)>,
 }
 
 /// One top-level markdown block: its byte range in `source` (the ranges
@@ -86,6 +89,8 @@ pub enum Message {
     FindClose,
     /// Flip between the rendered block view and one whole-document editor.
     ToggleRaw,
+    OpenLargeAnyway,
+    OpenLargeCancel,
 }
 
 pub fn boot(path: Option<PathBuf>) -> (State, Task<Message>) {
@@ -102,6 +107,7 @@ pub fn boot(path: Option<PathBuf>) -> (State, Task<Message>) {
         quit_armed: false,
         find: None,
         raw: None,
+        large_pending: None,
     };
 
     // Read synchronously: a typical markdown file loads in well under a

@@ -10,6 +10,12 @@ pub const EDITOR_ID: &str = "active-block";
 pub const FIND_ID: &str = "find-input";
 pub const SCROLL_ID: &str = "page-scroll";
 
+/// Everything renders eagerly for the first frame, and layout cost grows
+/// superlinearly with document size (measured on an M-series MacBook:
+/// 0.5MB ≈ 0.6s, 1MB ≈ 1.5s, 2MB ≈ 4.7s, 5MB ≈ 26s to first frame).
+/// Beyond this limit the user confirms before we render.
+pub const MAX_EAGER_BYTES: u64 = 500_000;
+
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
         Message::FileOpened(path) => {
@@ -220,13 +226,35 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             state.find = None;
             Task::none()
         }
+        Message::OpenLargeAnyway => {
+            if let Some((path, _)) = state.large_pending.take() {
+                open_file_unchecked(state, path);
+            }
+            Task::none()
+        }
+        Message::OpenLargeCancel => {
+            state.large_pending = None;
+            Task::none()
+        }
     }
+}
+
+/// Opens `path` unless it exceeds the eager-render limit, in which case a
+/// confirmation prompt is shown instead (see `MAX_EAGER_BYTES`).
+pub fn open_file(state: &mut State, path: PathBuf) {
+    if let Ok(meta) = std::fs::metadata(&path)
+        && meta.len() > MAX_EAGER_BYTES
+    {
+        state.large_pending = Some((path, meta.len()));
+        return;
+    }
+    open_file_unchecked(state, path);
 }
 
 /// Loads and shows `path` immediately, with code fences unhighlighted:
 /// syntect grammar compilation costs ~40ms, so the highlighted reparse is
 /// owed after the next frame instead (see `Message::FramePresented`).
-pub fn open_file(state: &mut State, path: PathBuf) {
+fn open_file_unchecked(state: &mut State, path: PathBuf) {
     let source = match std::fs::read_to_string(&path) {
         Ok(source) => source,
         Err(error) => {
@@ -244,6 +272,7 @@ pub fn open_file(state: &mut State, path: PathBuf) {
     state.disk_changed = false;
     state.quit_armed = false;
     state.raw = None;
+    state.large_pending = None;
     refresh_find(state);
 }
 
@@ -409,6 +438,7 @@ mod tests {
             quit_armed: false,
             find: None,
             raw: None,
+            large_pending: None,
         }
     }
 
@@ -594,6 +624,26 @@ mod tests {
             Message::Edit(text_editor::Action::Edit(text_editor::Edit::Insert('y'))),
         );
         assert!(!state.quit_armed);
+    }
+
+    #[test]
+    fn large_file_prompts_before_loading() {
+        let dir = std::env::temp_dir().join("skimd-test-large");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("big.md");
+        std::fs::write(&path, "x".repeat(MAX_EAGER_BYTES as usize + 1)).unwrap();
+
+        let mut state = state_with("existing\n");
+        open_file(&mut state, path.clone());
+        assert!(state.large_pending.is_some(), "should prompt, not load");
+        assert_eq!(state.source, "existing\n", "current doc untouched");
+
+        let _ = update(&mut state, Message::OpenLargeAnyway);
+        assert!(state.large_pending.is_none());
+        assert_eq!(state.path.as_deref(), Some(path.as_path()));
+        assert!(state.source.starts_with("xxx"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
