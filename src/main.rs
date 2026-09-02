@@ -88,26 +88,78 @@ fn subscription(state: &State) -> Subscription<Message> {
         Subscription::none()
     };
 
+    let watch = match &state.path {
+        Some(path) => file_watch(path.clone()),
+        None => Subscription::none(),
+    };
+
     Subscription::batch([
         frames,
+        watch,
         platform::file_opens().map(Message::FileOpened),
+        platform::quit_requests().map(|()| Message::Quit),
         iced::system::theme_changes().map(Message::SystemThemeChanged),
         iced::event::listen_with(|event, _status, _id| match event {
             iced::Event::Window(iced::window::Event::FileDropped(path)) => {
                 Some(Message::FileOpened(path))
             }
+            iced::Event::Window(iced::window::Event::CloseRequested) => Some(Message::Quit),
             _ => None,
         }),
-        // Cmd+S outside the editor (inside, the editor's key_binding wins
-        // because captured events never reach this listener).
-        iced::keyboard::listen().filter_map(|event| match event {
-            iced::keyboard::Event::KeyPressed { key, modifiers, .. }
-                if modifiers.command()
-                    && matches!(key.as_ref(), iced::keyboard::Key::Character("s")) =>
+        // Global shortcuts, outside the editor (inside, the editor's
+        // key_binding wins because captured events never reach this).
+        iced::keyboard::listen().filter_map(|event| {
+            let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
+                return None;
+            };
+            if let iced::keyboard::Key::Named(iced::keyboard::key::Named::Escape) =
+                key.as_ref()
             {
-                Some(Message::Save)
+                return Some(Message::FindClose);
             }
-            _ => None,
+            if !modifiers.command() {
+                return None;
+            }
+            match key.as_ref() {
+                iced::keyboard::Key::Character("s") => Some(Message::Save),
+                iced::keyboard::Key::Character("f") => Some(Message::FindOpen),
+                iced::keyboard::Key::Character("q")
+                | iced::keyboard::Key::Character("w") => Some(Message::Quit),
+                _ => None,
+            }
         }),
     ])
+}
+
+/// Watches the open file for external changes. Keyed by path, so switching
+/// files restarts the watcher; the notify watcher lives inside the stream
+/// state to stay alive for the subscription's lifetime.
+fn file_watch(path: std::path::PathBuf) -> Subscription<Message> {
+    use iced::futures::StreamExt;
+    use notify::Watcher;
+
+    Subscription::run_with(path, |path| {
+        let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+        let mut watcher = notify::recommended_watcher(
+            move |result: Result<notify::Event, notify::Error>| {
+                if let Ok(event) = result
+                    && matches!(
+                        event.kind,
+                        notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+                    )
+                {
+                    let _ = tx.unbounded_send(());
+                }
+            },
+        )
+        .ok();
+        if let Some(watcher) = &mut watcher {
+            let _ = watcher.watch(path, notify::RecursiveMode::NonRecursive);
+        }
+
+        iced::futures::stream::unfold((watcher, rx), |(watcher, mut rx)| async move {
+            rx.next().await?;
+            Some((Message::DiskChanged, (watcher, rx)))
+        })
+    })
 }

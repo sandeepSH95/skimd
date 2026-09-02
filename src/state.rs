@@ -21,6 +21,13 @@ pub struct State {
     /// The current file has language-tagged code fences rendered without
     /// highlighting; a highlighted reparse is owed after the next frame.
     pub needs_highlight: bool,
+    /// The file changed on disk while we hold unsaved edits; the user must
+    /// pick a side (banner with Reload / Keep mine).
+    pub disk_changed: bool,
+    /// A quit was requested with unsaved changes; quitting again discards.
+    pub quit_armed: bool,
+    /// `Some` while the find bar is open.
+    pub find: Option<Find>,
 }
 
 /// One top-level markdown block: its byte range in `source` (the ranges
@@ -37,6 +44,14 @@ pub struct Editing {
     /// Trailing newlines of the block's slice (the inter-block gap), held
     /// out of the editor and re-attached verbatim on commit.
     pub suffix: String,
+}
+
+pub struct Find {
+    pub query: String,
+    /// Indices of blocks containing the query, in document order.
+    pub matches: Vec<usize>,
+    /// Position in `matches` of the match jumped to last.
+    pub current: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +72,15 @@ pub enum Message {
     CommitActive,
     Save,
     Saved(Result<(), String>),
+    /// The watched file changed on disk.
+    DiskChanged,
+    ReloadFromDisk,
+    KeepMine,
+    Quit,
+    FindOpen,
+    FindInput(String),
+    FindNext,
+    FindClose,
 }
 
 pub fn boot(path: Option<PathBuf>) -> (State, Task<Message>) {
@@ -69,6 +93,9 @@ pub fn boot(path: Option<PathBuf>) -> (State, Task<Message>) {
         mode: Mode::None,
         error: None,
         needs_highlight: false,
+        disk_changed: false,
+        quit_armed: false,
+        find: None,
     };
 
     // Read synchronously: a typical markdown file loads in well under a

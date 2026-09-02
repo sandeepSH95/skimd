@@ -7,6 +7,7 @@ description = "Ultra-fast beautiful markdown viewer"
 [dependencies]
 env_logger = { version = "0.11", optional = true }
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "markdown", "highlighter", "thread-pool", "crisp", "advanced"] }
+notify = "8"
 open = "5"
 pulldown-cmark = { version = "0.12", default-features = false }
 

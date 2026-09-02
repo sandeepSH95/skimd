@@ -2,14 +2,15 @@ use iced::keyboard::{Key, key};
 use iced::theme::Mode;
 use iced::widget::text_editor::{Binding, KeyPress};
 use iced::widget::{
-    column, container, markdown, mouse_area, rich_text, scrollable, text, text_editor,
+    button, column, container, markdown, mouse_area, rich_text, row, scrollable, text,
+    text_editor, text_input,
 };
 use iced::{Element, Fill, Pixels, padding};
 use pulldown_cmark::HeadingLevel;
 
-use crate::state::{Editing, Message, State};
+use crate::state::{Editing, Find, Message, State};
 use crate::theme;
-use crate::update::EDITOR_ID;
+use crate::update::{EDITOR_ID, FIND_ID, SCROLL_ID};
 
 pub fn view(state: &State) -> Element<'_, Message> {
     if state.path.is_none() {
@@ -41,15 +42,77 @@ pub fn view(state: &State) -> Element<'_, Message> {
 
     // Blocks and the editor capture their own clicks; anything that falls
     // through hit empty background, which commits the active edit.
-    mouse_area(
+    let doc = mouse_area(
         scrollable(
             container(page.spacing(settings.spacing).max_width(720).padding([48, 32]))
                 .center_x(Fill),
         )
+        .id(SCROLL_ID)
         .width(Fill)
         .height(Fill),
     )
-    .on_press(Message::CommitActive)
+    .on_press(Message::CommitActive);
+
+    let mut root = column![];
+    if let Some(find) = &state.find {
+        root = root.push(find_bar(find));
+    }
+    if state.disk_changed {
+        root = root.push(banner(
+            "File changed on disk",
+            row![
+                button(text("Reload").size(13)).on_press(Message::ReloadFromDisk),
+                button(text("Keep mine").size(13)).on_press(Message::KeepMine),
+            ]
+            .spacing(8)
+            .into(),
+        ));
+    }
+    if state.quit_armed {
+        root = root.push(banner(
+            "Unsaved changes. Save with Cmd+S, or quit again to discard.",
+            text("").into(),
+        ));
+    }
+    root.push(doc).into()
+}
+
+fn banner<'a>(message: &'a str, actions: Element<'a, Message>) -> Element<'a, Message> {
+    container(
+        row![text(message).size(14).width(Fill), actions]
+            .spacing(12)
+            .align_y(iced::Alignment::Center),
+    )
+    .padding([8, 16])
+    .width(Fill)
+    .style(container::warning)
+    .into()
+}
+
+fn find_bar(find: &Find) -> Element<'_, Message> {
+    let counter = if find.query.is_empty() {
+        String::new()
+    } else if find.matches.is_empty() {
+        "0 matches".to_owned()
+    } else {
+        format!("{}/{}", find.current + 1, find.matches.len())
+    };
+
+    container(
+        row![
+            text_input("Find in document", &find.query)
+                .id(FIND_ID)
+                .on_input(Message::FindInput)
+                .on_submit(Message::FindNext)
+                .size(14)
+                .width(Fill),
+            text(counter).size(13).style(text::secondary),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding([6, 16])
+    .width(Fill)
     .into()
 }
 
@@ -77,10 +140,15 @@ fn key_binding(key_press: KeyPress) -> Option<Binding<Message>> {
     if let Key::Named(key::Named::Escape) = key_press.key.as_ref() {
         return Some(Binding::Custom(Message::CommitActive));
     }
-    if key_press.modifiers.command()
-        && matches!(key_press.key.as_ref(), Key::Character("s"))
-    {
-        return Some(Binding::Custom(Message::Save));
+    if key_press.modifiers.command() {
+        match key_press.key.as_ref() {
+            Key::Character("s") => return Some(Binding::Custom(Message::Save)),
+            Key::Character("f") => return Some(Binding::Custom(Message::FindOpen)),
+            Key::Character("q") | Key::Character("w") => {
+                return Some(Binding::Custom(Message::Quit));
+            }
+            _ => {}
+        }
     }
     Binding::from_key_press(key_press)
 }

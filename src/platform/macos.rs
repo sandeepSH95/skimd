@@ -28,10 +28,14 @@ use objc2_foundation::{
 
 const K_CORE_EVENT_CLASS: u32 = 0x6165_7674; // 'aevt'
 const K_AE_OPEN_DOCUMENTS: u32 = 0x6F64_6F63; // 'odoc'
+const K_AE_QUIT_APPLICATION: u32 = 0x7175_6974; // 'quit'
 const KEY_DIRECT_OBJECT: u32 = 0x2D2D_2D2D; // '----'
 
 static SENDER: OnceLock<mpsc::UnboundedSender<PathBuf>> = OnceLock::new();
 static RECEIVER: Mutex<Option<mpsc::UnboundedReceiver<PathBuf>>> = Mutex::new(None);
+
+static QUIT_SENDER: OnceLock<mpsc::UnboundedSender<()>> = OnceLock::new();
+static QUIT_RECEIVER: Mutex<Option<mpsc::UnboundedReceiver<()>>> = Mutex::new(None);
 
 declare_class!(
     struct OpenHandler;
@@ -58,14 +62,28 @@ declare_class!(
             forward_paths(event);
         }
 
+        // winit's NSApplicationDelegate refuses app termination, so Dock
+        // Quit and 'quit' Apple Events would otherwise be dead ends; we
+        // route them to the app as a message instead.
+        #[method(handleQuitEvent:withReplyEvent:)]
+        fn handle_quit_event(
+            &self,
+            _event: &NSAppleEventDescriptor,
+            _reply: &NSAppleEventDescriptor,
+        ) {
+            if let Some(sender) = QUIT_SENDER.get() {
+                let _ = sender.unbounded_send(());
+            }
+        }
+
         #[method(applicationWillFinishLaunching:)]
         fn application_will_finish_launching(&self, _notification: &NSNotification) {
-            register_odoc_handler(self);
+            register_event_handlers(self);
         }
     }
 );
 
-fn register_odoc_handler(handler: &OpenHandler) {
+fn register_event_handlers(handler: &OpenHandler) {
     unsafe {
         let manager = NSAppleEventManager::sharedAppleEventManager();
         let _: () = msg_send![
@@ -74,6 +92,13 @@ fn register_odoc_handler(handler: &OpenHandler) {
             andSelector: sel!(handleEvent:withReplyEvent:),
             forEventClass: K_CORE_EVENT_CLASS,
             andEventID: K_AE_OPEN_DOCUMENTS,
+        ];
+        let _: () = msg_send![
+            &*manager,
+            setEventHandler: handler as &OpenHandler,
+            andSelector: sel!(handleQuitEvent:withReplyEvent:),
+            forEventClass: K_CORE_EVENT_CLASS,
+            andEventID: K_AE_QUIT_APPLICATION,
         ];
     }
 }
@@ -109,14 +134,17 @@ pub fn install_open_handler() {
         return;
     }
     *RECEIVER.lock().unwrap() = Some(receiver);
+    let (quit_sender, quit_receiver) = mpsc::unbounded();
+    let _ = QUIT_SENDER.set(quit_sender);
+    *QUIT_RECEIVER.lock().unwrap() = Some(quit_receiver);
 
     let this = mtm.alloc::<OpenHandler>().set_ivars(());
     let handler: Retained<OpenHandler> = unsafe { msg_send_id![super(this), init] };
 
-    // Take the handler slot now for events that arrive pre-launch, and
-    // observe willFinishLaunching to take it back from AppKit (see the
+    // Take the handler slots now for events that arrive pre-launch, and
+    // observe willFinishLaunching to take them back from AppKit (see the
     // module docs for the displacement dance).
-    register_odoc_handler(&handler);
+    register_event_handlers(&handler);
     unsafe {
         let center = NSNotificationCenter::defaultCenter();
         let name = NSString::from_str("NSApplicationWillFinishLaunchingNotification");
@@ -140,5 +168,15 @@ pub fn file_opens() -> Subscription<PathBuf> {
             .unwrap()
             .take()
             .expect("file_opens is subscribed exactly once")
+    })
+}
+
+pub fn quit_requests() -> Subscription<()> {
+    Subscription::run(|| {
+        QUIT_RECEIVER
+            .lock()
+            .unwrap()
+            .take()
+            .expect("quit_requests is subscribed exactly once")
     })
 }

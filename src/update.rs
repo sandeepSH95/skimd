@@ -1,12 +1,14 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use iced::Task;
 use iced::widget::text_editor;
 
 use crate::parse;
-use crate::state::{Editing, Message, State};
+use crate::state::{Editing, Find, Message, State};
 
 pub const EDITOR_ID: &str = "active-block";
+pub const FIND_ID: &str = "find-input";
+pub const SCROLL_ID: &str = "page-scroll";
 
 pub fn update(state: &mut State, message: Message) -> Task<Message> {
     match message {
@@ -89,6 +91,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             if let Some(editing) = &mut state.editing {
                 if matches!(action, text_editor::Action::Edit(_)) {
                     state.dirty = true;
+                    state.quit_armed = false;
                 }
                 editing.editor.perform(action);
             }
@@ -100,6 +103,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
         }
         Message::Save => {
             commit_active(state);
+            state.quit_armed = false;
             let Some(path) = state.path.clone() else {
                 return Task::none();
             };
@@ -108,7 +112,7 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
             }
             let contents = state.source.clone();
             Task::perform(
-                async move { std::fs::write(&path, contents).map_err(|e| e.to_string()) },
+                async move { write_atomic(&path, &contents) },
                 Message::Saved,
             )
         }
@@ -117,6 +121,80 @@ pub fn update(state: &mut State, message: Message) -> Task<Message> {
                 Ok(()) => state.dirty = false,
                 Err(error) => state.error = Some(format!("Could not save: {error}")),
             }
+            Task::none()
+        }
+        Message::DiskChanged => {
+            let Some(path) = &state.path else {
+                return Task::none();
+            };
+            let Ok(disk) = std::fs::read_to_string(path) else {
+                return Task::none();
+            };
+            if disk == state.source {
+                // Echo of our own save, or a touch without content change.
+            } else if state.dirty || state.editing.is_some() {
+                state.disk_changed = true;
+            } else {
+                load_source(state, disk);
+            }
+            Task::none()
+        }
+        Message::ReloadFromDisk => {
+            state.disk_changed = false;
+            if let Some(path) = state.path.clone() {
+                match std::fs::read_to_string(&path) {
+                    Ok(disk) => load_source(state, disk),
+                    Err(error) => {
+                        state.error =
+                            Some(format!("Could not reload {}: {error}", path.display()));
+                    }
+                }
+            }
+            Task::none()
+        }
+        Message::KeepMine => {
+            state.disk_changed = false;
+            Task::none()
+        }
+        Message::Quit => {
+            let editing_changes = state.editing.is_some();
+            if (state.dirty || editing_changes) && !state.quit_armed {
+                state.quit_armed = true;
+                return Task::none();
+            }
+            iced::exit()
+        }
+        Message::FindOpen => {
+            if state.find.is_none() {
+                state.find = Some(Find {
+                    query: String::new(),
+                    matches: Vec::new(),
+                    current: 0,
+                });
+            }
+            iced::widget::operation::focus(FIND_ID)
+        }
+        Message::FindInput(query) => {
+            let matches = find_matches(&state.source, &state.blocks, &query);
+            state.find = Some(Find {
+                query,
+                matches,
+                current: 0,
+            });
+            scroll_to_current_match(state)
+        }
+        Message::FindNext => {
+            let Some(find) = &mut state.find else {
+                return Task::none();
+            };
+            if find.matches.is_empty() {
+                return Task::none();
+            }
+            find.current = (find.current + 1) % find.matches.len();
+            scroll_to_current_match(state)
+        }
+        Message::FindClose => {
+            state.find = None;
             Task::none()
         }
     }
@@ -140,6 +218,19 @@ pub fn open_file(state: &mut State, path: PathBuf) {
     state.editing = None;
     state.dirty = false;
     state.error = None;
+    state.disk_changed = false;
+    state.quit_armed = false;
+    refresh_find(state);
+}
+
+/// Replaces the document with `source` (highlighted parse; used for disk
+/// reloads, where syntect is warm long since).
+fn load_source(state: &mut State, source: String) {
+    (state.blocks, _) = parse::parse_blocks(&source, true);
+    state.source = source;
+    state.editing = None;
+    state.dirty = false;
+    refresh_find(state);
 }
 
 /// Swaps the block at `index` to a raw-markdown editor and focuses it.
@@ -188,6 +279,64 @@ fn commit_active(state: &mut State) {
     );
     state.source = source;
     state.dirty = true;
+    refresh_find(state);
+}
+
+/// Writes via a temp file in the same directory plus rename, so a crash
+/// mid-write can never leave a truncated file.
+fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".skimd-tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, contents)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|e| e.to_string())
+}
+
+/// Case-insensitive substring search; returns indices of matching blocks.
+fn find_matches(source: &str, blocks: &[crate::state::Block], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let query = query.to_lowercase();
+    blocks
+        .iter()
+        .enumerate()
+        .filter(|(_, block)| {
+            source[block.range.clone()].to_lowercase().contains(&query)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn refresh_find(state: &mut State) {
+    if let Some(find) = &mut state.find {
+        find.matches = find_matches(&state.source, &state.blocks, &find.query);
+        find.current = 0;
+    }
+}
+
+/// Jumps the scrollable to the current match's block, positioned by its
+/// byte offset as a fraction of the document (approximate but cheap).
+fn scroll_to_current_match(state: &State) -> Task<Message> {
+    let Some(find) = &state.find else {
+        return Task::none();
+    };
+    let Some(&block_index) = find.matches.get(find.current) else {
+        return Task::none();
+    };
+    if state.source.is_empty() {
+        return Task::none();
+    }
+    let fraction =
+        state.blocks[block_index].range.start as f32 / state.source.len() as f32;
+    iced::widget::operation::snap_to(
+        SCROLL_ID,
+        iced::widget::operation::RelativeOffset {
+            x: 0.0,
+            y: fraction,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -208,6 +357,9 @@ mod tests {
             mode: iced::theme::Mode::None,
             error: None,
             needs_highlight: false,
+            disk_changed: false,
+            quit_armed: false,
+            find: None,
         }
     }
 
@@ -299,9 +451,7 @@ mod tests {
     #[test]
     #[ignore]
     fn commit_latency_100kb() {
-        let source: String = std::iter::repeat(SHOWCASE)
-            .take(100_000 / SHOWCASE.len() + 1)
-            .collect();
+        let source = SHOWCASE.repeat(100_000 / SHOWCASE.len() + 1);
         let mut state = state_with(&source);
 
         // First editor Content in the process initializes the global font
@@ -315,22 +465,10 @@ mod tests {
         editing
             .editor
             .perform(text_editor::Action::Edit(text_editor::Edit::Insert('x')));
-        let activated = start.elapsed();
-
-        let seg_start = std::time::Instant::now();
-        let seg = parse::segment(&state.source);
-        let seg_time = seg_start.elapsed();
-        println!("segment: {seg_time:?} ({} blocks)", seg.len());
-
-        let commit_start = std::time::Instant::now();
         commit_active(&mut state);
-        let committed = commit_start.elapsed();
         let elapsed = start.elapsed();
 
-        println!(
-            "commit on {}KB: {elapsed:?} (activate+insert {activated:?}, commit {committed:?})",
-            source.len() / 1000
-        );
+        println!("commit on {}KB: {elapsed:?}", source.len() / 1000);
         assert!(elapsed.as_millis() < 16, "commit took {elapsed:?}");
     }
 
@@ -354,5 +492,42 @@ mod tests {
         // Activation places the cursor at the block's end, so the paste
         // extends "aa" rather than preceding it.
         assert!(state.source.starts_with("aalonger first block"));
+    }
+
+    #[test]
+    fn find_matches_blocks_case_insensitively() {
+        let state = state_with("Alpha beta\n\ngamma\n\nBETA again\n");
+        let matches = find_matches(&state.source, &state.blocks, "beta");
+        assert_eq!(matches, vec![0, 2]);
+        assert!(find_matches(&state.source, &state.blocks, "").is_empty());
+        assert!(find_matches(&state.source, &state.blocks, "zeta").is_empty());
+    }
+
+    #[test]
+    fn quit_arms_when_dirty() {
+        let mut state = state_with("hello\n");
+        edit_block(&mut state, 0, "changed");
+        assert!(state.dirty);
+        let _ = update(&mut state, Message::Quit);
+        assert!(state.quit_armed, "first quit should arm, not exit");
+        // A new edit disarms.
+        let _ = activate(&mut state, 0);
+        let _ = update(
+            &mut state,
+            Message::Edit(text_editor::Action::Edit(text_editor::Edit::Insert('y'))),
+        );
+        assert!(!state.quit_armed);
+    }
+
+    #[test]
+    fn write_atomic_writes_and_replaces() {
+        let dir = std::env::temp_dir().join("skimd-test-atomic");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("f.md");
+        write_atomic(&path, "one").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "one");
+        write_atomic(&path, "two").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "two");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
